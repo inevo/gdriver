@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // OAuth
@@ -21,6 +22,8 @@ var config = &oauth.Config{
 	AuthURL:      "https://accounts.google.com/o/oauth2/auth",
 	TokenURL:     "https://accounts.google.com/o/oauth2/token",
 }
+
+var service *drive.Service
 
 // Flags
 var (
@@ -59,29 +62,11 @@ func getExportLink(file *drive.File, mimeType string) string {
 	return fmt.Sprintf("https://docs.google.com/feeds/download/documents/export/Export?id=%s&exportFormat=%s", file.Id, format)
 }
 
-func main() {
-	flag.Parse()
-	if flag.NArg() == 0 {
-		usage()
-	}
-
-	fileId := flag.Arg(0)
-
-	config.Scope = drive.DriveScope
-	config.ClientId = *clientId
-	config.ClientSecret = *secret
-
-	client = getOAuthClient(config)
-
-	service, _ := drive.New(client)
-
-	driveFile, err := service.Files.Get(fileId).Do()
-	log.Printf("Got file %s (err: %#v)", driveFile.Title, err)
-
-	downloadUrl := getExportLink(driveFile, *mimeType)
+func renderFile(file *drive.File, outFile string) {
+	downloadUrl := getExportLink(file, *mimeType)
 
 	inFormat := "html"
-	outFile := fmt.Sprintf("%s.pdf", driveFile.Title)
+
 	cmd := exec.Command("pandoc", "-f", inFormat, "-o", outFile)
 
 	pandocIn, err := cmd.StdinPipe()
@@ -97,9 +82,61 @@ func main() {
 	DownloadFile(downloadUrl, pandocIn)
 	pandocIn.Close()
 
-	log.Printf("Creating for %s ...", outFile)
+	log.Printf("Creating %s ...", outFile)
 
 	if err := cmd.Wait(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func renderFiles(fileId string, path string) {
+
+	// Get the file
+	file, _ := service.Files.Get(fileId).Do()
+
+	//log.Printf("File: \n %#v", file)
+
+	// Check if this is a folder
+	if file.MimeType == "application/vnd.google-apps.folder" {
+
+		path = filepath.Join(path, file.Title)
+
+		log.Printf("Got folder %s", path)
+
+		// create the directory
+		os.Mkdir(path, 0700)
+
+		childList, _ := service.Children.List(file.Id).Do()
+
+		for _, ref := range childList.Items {
+			renderFiles(ref.Id, path)
+		}
+
+	} else {
+		log.Printf("Got file %s/%s", path, file.Title)
+
+		outFile := filepath.Join(path, fmt.Sprintf("%s.pdf", file.Title))
+
+		renderFile(file, outFile)
+	}
+}
+
+func main() {
+	flag.Parse()
+	if flag.NArg() == 0 {
+		usage()
+	}
+
+	fileId := flag.Arg(0)
+
+	config.Scope = drive.DriveScope
+	config.ClientId = *clientId
+	config.ClientSecret = *secret
+
+	client = getOAuthClient(config)
+
+	service, _ = drive.New(client)
+
+	renderFiles(fileId, ".")
+
 }
